@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: ponte
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CLOUDFLARE_TURN_KEY_ID
+        sync: false
+      - key: CLOUDFLARE_TURN_API_TOKEN
+        sync: false
+      - key: TURN_TTL_SECONDS
+        value: "3600"
+      - key: TRUST_PROXY
+        value: "true"

@@ -1,0 +1,21 @@
+{
+  "name": "ponte",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Transferencia direta e segura entre computador e celular",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js && node --check public/app.js && node --check public/sw.js && node --check test/smoke.js",
+    "test": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "qr-scanner": "^1.4.2",
+    "qrcode": "^1.5.4",
+    "ws": "^8.18.3"
+  }
+}
