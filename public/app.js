@@ -63,6 +63,7 @@ const state = {
   toastTimer: null,
   offerSdp: "",
   answerSdp: "",
+  pendingCandidates: [],
   qrScanner: null,
   qrHandled: false,
   pairingUrl: ""
@@ -165,6 +166,7 @@ function cleanupConnection(showWelcome = true) {
   state.sending = false;
   state.offerSdp = "";
   state.answerSdp = "";
+  state.pendingCandidates = [];
   elements.roomQrImage.removeAttribute("src");
   if (showWelcome) {
     elements.roomView.classList.add("hidden");
@@ -249,42 +251,56 @@ async function connectToRoom(code, creator) {
 
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   state.socket = new WebSocket(`${protocol}//${location.host}/signal`);
+  const socket = state.socket;
+  let signalingQueue = Promise.resolve();
 
-  state.socket.addEventListener("open", () => {
-    state.socket.send(JSON.stringify({ type: "join", room: code }));
+  socket.addEventListener("open", () => {
+    if (socket !== state.socket) return;
+    socket.send(JSON.stringify({ type: "join", room: code }));
   });
 
-  state.socket.addEventListener("message", async (event) => {
+  socket.addEventListener("message", (event) => {
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
 
-    if (message.type === "error") {
-      setConnectionStatus("error", "Erro");
-      showToast(message.message || "Não foi possível conectar");
-      return;
-    }
-    if (message.type === "peer-ready" && state.creator && !state.peer) {
-      await createOffer();
-      return;
-    }
-    if (message.type === "signal") await receiveSignal(message.data);
-    if (message.type === "peer-left") {
-      setConnectionStatus("error", "Desconectado");
-      showToast("O outro aparelho encerrou a conexão");
-      state.channel?.close();
-      state.peer?.close();
-      state.channel = null;
-      state.peer = null;
-      elements.transferPanel.classList.add("hidden");
-      elements.waitingPanel.classList.remove("hidden");
-      elements.roomTitle.textContent = "Aguardando reconexão";
-    }
+    // WebSocket events do not await async handlers. Keep SDP and ICE in order.
+    signalingQueue = signalingQueue.then(async () => {
+      if (socket !== state.socket) return;
+      if (message.type === "error") {
+        setConnectionStatus("error", "Erro");
+        showToast(message.message || "Não foi possível conectar");
+        return;
+      }
+      if (message.type === "peer-ready" && state.creator && !state.peer) {
+        await createOffer();
+        return;
+      }
+      if (message.type === "signal") await receiveSignal(message.data);
+      if (message.type === "peer-left") {
+        setConnectionStatus("error", "Desconectado");
+        showToast("O outro aparelho encerrou a conexão");
+        state.channel?.close();
+        state.peer?.close();
+        state.channel = null;
+        state.peer = null;
+        state.pendingCandidates = [];
+        elements.transferPanel.classList.add("hidden");
+        elements.waitingPanel.classList.remove("hidden");
+        elements.roomTitle.textContent = "Aguardando reconexão";
+      }
+    }).catch(() => {
+      if (socket !== state.socket) return;
+      setConnectionStatus("error", "Falha no pareamento");
+      showToast("Não foi possível negociar a conexão entre os aparelhos");
+    });
   });
 
-  state.socket.addEventListener("close", () => {
+  socket.addEventListener("close", () => {
+    if (socket !== state.socket) return;
     if (state.roomCode && !state.channel) setConnectionStatus("error", "Sem sinal");
   });
-  state.socket.addEventListener("error", () => {
+  socket.addEventListener("error", () => {
+    if (socket !== state.socket) return;
     setConnectionStatus("error", "Erro de rede");
     showToast("Falha ao acessar o servidor de pareamento");
   });
@@ -324,6 +340,7 @@ async function receiveSignal(data) {
         state.offerSdp = description.sdp;
         const peer = state.peer || createPeer();
         await peer.setRemoteDescription(description);
+        await flushPendingCandidates(peer);
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
         state.answerSdp = peer.localDescription.sdp;
@@ -332,18 +349,31 @@ async function receiveSignal(data) {
       } else if (description.type === "answer" && state.peer) {
         state.answerSdp = description.sdp;
         await state.peer.setRemoteDescription(description);
+        await flushPendingCandidates(state.peer);
         await updateSecurityCode();
       }
       return;
     }
     if (data.kind === "candidate" && data.candidate) {
-      const peer = state.peer || createPeer();
-      await peer.addIceCandidate(data.candidate);
+      // ICE may arrive before the remote SDP, especially with fast desktops.
+      if (!state.peer?.remoteDescription) {
+        state.pendingCandidates.push(data.candidate);
+      } else {
+        await state.peer.addIceCandidate(data.candidate);
+      }
     }
   } catch (error) {
     console.error(error);
     setConnectionStatus("error", "Falha no pareamento");
     showToast("Não foi possível criar a conexão direta");
+  }
+}
+
+async function flushPendingCandidates(peer) {
+  const candidates = state.pendingCandidates;
+  state.pendingCandidates = [];
+  for (const candidate of candidates) {
+    await peer.addIceCandidate(candidate);
   }
 }
 

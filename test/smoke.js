@@ -64,6 +64,11 @@ try {
   assert.ok(turnServer.credential);
   assert.doesNotMatch(JSON.stringify(config), /smoke-test-secret/);
 
+  const appResponse = await fetch(origin);
+  assert.ok(appResponse.headers.get("content-security-policy").includes(`connect-src 'self' ws://127.0.0.1:${port};`));
+  const secureAppResponse = await fetch(origin, { headers: { "X-Forwarded-Proto": "https" } });
+  assert.ok(secureAppResponse.headers.get("content-security-policy").includes(`connect-src 'self' wss://127.0.0.1:${port};`));
+
   const qrResponse = await fetch(`${origin}/api/qr?room=123456`);
   assert.equal(qrResponse.status, 200);
   assert.match(qrResponse.headers.get("content-type"), /image\/svg\+xml/);

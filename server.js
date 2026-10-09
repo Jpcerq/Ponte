@@ -199,9 +199,17 @@ const server = http.createServer(async (request, response) => {
     const cacheControl = requestedPath === "/index.html" || extension === ".js"
       ? "no-cache"
       : "public, max-age=86400";
+    // Some browsers do not include WebSocket schemes in connect-src 'self'.
+    const socketOrigin = new URL(getPublicOrigin(request));
+    socketOrigin.protocol = socketOrigin.protocol === "https:" ? "wss:" : "ws:";
+    const contentSecurityPolicy = securityHeaders["Content-Security-Policy"].replace(
+      "connect-src 'self';",
+      `connect-src 'self' ${socketOrigin.origin};`
+    );
 
     response.writeHead(200, {
       ...securityHeaders,
+      "Content-Security-Policy": contentSecurityPolicy,
       "Content-Type": mimeTypes[extension] || "application/octet-stream",
       "Content-Length": body.length,
       "Cache-Control": cacheControl
