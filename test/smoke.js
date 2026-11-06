@@ -90,7 +90,17 @@ try {
   socket.close();
 
   await expectRejectedOrigin();
-  console.log("Smoke test concluído: HTTP, TURN temporário, QR, WebSocket e validação de origem.");
+
+  const statuses = [];
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const limitedResponse = await fetch(`${origin}/api/config`);
+    await limitedResponse.text();
+    statuses.push(limitedResponse.status);
+  }
+  assert.equal(statuses[0], 200);
+  assert.equal(statuses.at(-1), 429);
+
+  console.log("Smoke test concluído: HTTP, TURN temporário, QR, WebSocket, validação de origem e limite de configuração.");
 } finally {
   server.kill();
 }

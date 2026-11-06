@@ -124,6 +124,21 @@ function getClientIp(request) {
   return request.socket.remoteAddress;
 }
 
+const configAttempts = new Map();
+const CONFIG_REQUESTS_PER_MINUTE = 20;
+
+function isConfigRateLimited(ip) {
+  const now = Date.now();
+  const attempt = configAttempts.get(ip) || { count: 0, startedAt: now };
+  if (now - attempt.startedAt > 60_000) {
+    attempt.count = 0;
+    attempt.startedAt = now;
+  }
+  attempt.count += 1;
+  configAttempts.set(ip, attempt);
+  return attempt.count > CONFIG_REQUESTS_PER_MINUTE;
+}
+
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
@@ -133,6 +148,9 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (url.pathname === "/api/config") {
+      if (isConfigRateLimited(getClientIp(request))) {
+        return sendJson(response, 429, { error: "Muitas requisicoes. Aguarde um minuto." });
+      }
       if (process.env.ICE_SERVERS_JSON) {
         try {
           JSON.parse(process.env.ICE_SERVERS_JSON);
@@ -336,8 +354,10 @@ const heartbeat = setInterval(() => {
       rooms.delete(roomCode);
     }
   }
-  for (const [ip, attempt] of joinAttempts) {
-    if (now - attempt.startedAt > 2 * 60_000) joinAttempts.delete(ip);
+  for (const attempts of [joinAttempts, configAttempts]) {
+    for (const [ip, attempt] of attempts) {
+      if (now - attempt.startedAt > 2 * 60_000) attempts.delete(ip);
+    }
   }
 }, 30_000);
 
