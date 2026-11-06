@@ -1,84 +1,126 @@
 # Ponte
 
-Ponte é uma PWA instalável para enviar textos, fotos e documentos diretamente entre computador e celular. O servidor apenas apresenta os dois aparelhos; o conteúdo trafega por um canal WebRTC ponto a ponto.
+Peer-to-peer file transfer between a computer and a phone, in the browser. No account, and no server storing your files. "Ponte" means "bridge" in Portuguese.
 
-## O que já funciona
+## Why it exists
 
-- Pareamento com código temporário de 6 dígitos.
-- Pareamento por QR Code: use o leitor dentro do Ponte ou a câmera normal do celular para abrir o link.
-- Transferência de vários arquivos em sequência, com progresso e controle de buffer.
-- Envio de texto e cópia com um toque.
-- Criptografia de transporte WebRTC (DTLS) e código visual de segurança igual nos dois aparelhos.
-- SHA-256 incremental no emissor e no receptor. Um arquivo alterado ou incompleto é descartado.
-- STUN público e suporte a Cloudflare Realtime TURN ou coturn, com credenciais temporárias geradas pelo servidor.
-- Instalação como aplicativo no Android, iPhone/iPad, Windows, macOS e Linux por um navegador compatível com PWA.
-- Interface responsiva, cache do aplicativo e servidor sem banco de dados.
+Moving a file from a computer to a phone usually means sending it to yourself through a chat app or a cloud drive, so the file ends up on someone else's server. Ponte connects the two devices directly. The server only introduces them, and the content travels over an encrypted WebRTC channel.
 
-## Executar localmente
+## Features
 
-Requer Node.js 20 ou superior.
+- Pairing with a temporary 6-digit code or a QR code
+- Multiple files in sequence, with progress, plus text messages
+- Encrypted transport (DTLS) and a visual security code to compare on both screens
+- Incremental SHA-256 on both sides: a file that is altered or incomplete is discarded
+- Installable PWA for Android, iOS, Windows, macOS and Linux
+- No database and no file storage on the server
+
+## How it works
+
+```mermaid
+sequenceDiagram
+    participant A as Device A (creates the room)
+    participant S as Node.js server
+    participant T as Cloudflare TURN
+    participant B as Device B
+
+    A->>S: GET /api/config
+    S->>T: Request short-lived credentials
+    T-->>S: ICE servers
+    S-->>A: STUN + temporary TURN credentials
+    B->>S: GET /api/config
+    S-->>B: STUN + temporary TURN credentials
+
+    A->>S: WebSocket: join room
+    B->>S: WebSocket: join room
+    S-->>A: peer-ready
+    S-->>B: peer-ready
+
+    A->>S: SDP offer
+    S->>B: SDP offer
+    B->>S: SDP answer
+    S->>A: SDP answer
+    A->>S: ICE candidates
+    S->>B: ICE candidates
+    B->>S: ICE candidates
+    S->>A: ICE candidates
+
+    Note over A,B: ICE tries a direct route first and falls back to the TURN relay
+    A->>B: DataChannel: file metadata
+    A->>B: DataChannel: 64 KiB chunks
+    A->>B: DataChannel: end of file + SHA-256
+    Note over B: The file can be saved only if size and hash match
+```
+
+## Technical decisions
+
+**Peer-to-peer instead of upload.** The server never receives file contents, so it stays small: no database, no object storage, and nothing to delete afterwards.
+
+**Custom signaling over WebSocket.** The protocol has only what pairing needs: `join`, `signal`, `peer-ready` and `peer-left`. Rooms hold two devices, expire after 15 minutes and live in memory, which is why this version runs as a single instance.
+
+**STUN first, TURN as a fallback.** A direct route costs nothing and works on many networks. Devices on different networks, such as Wi-Fi and 4G, may need the relay.
+
+**TURN secrets stay on the server.** The Cloudflare token exists only in environment variables. Browsers receive short-lived credentials from `/api/config`.
+
+**512 MB per file.** Traffic that goes through the TURN relay has a cost, so the limit keeps that under control. The receiver also holds the file in memory until the hash is verified, which makes very large files impractical in a browser.
+
+**Chunking with backpressure.** Files are read and sent in 64 KiB chunks. The sender pauses when the DataChannel buffer passes 2 MiB and resumes when it drops below 512 KiB, so a fast sender does not exhaust memory.
+
+**Incremental SHA-256.** Web Crypto cannot hash a stream, so the app includes an incremental implementation that checks itself against a known test vector at startup.
+
+**Security code.** Both devices hash the SDP offer and answer and show the first bytes. Since the SDP carries the DTLS fingerprints, different codes mean the connection should not be trusted, even if the signaling server is compromised.
+
+**Abuse limits.** Join attempts and `/api/config` requests are limited per IP. WebSocket messages have rate and size limits, the WebSocket origin is validated, and responses carry a strict Content Security Policy.
+
+## Stack
+
+Node.js 20+, `ws`, WebRTC, vanilla JavaScript PWA, `qrcode`, `qr-scanner`, Docker, Render, Cloudflare Realtime TURN.
+
+## Run locally
 
 ```bash
 npm install
 npm start
 ```
 
-Abra `http://localhost:4173` no computador. Para um teste rápido entre duas abas do mesmo computador, crie a conexão em uma e use o código na outra.
+Open `http://localhost:4173`. To try it on one computer, create a connection in one tab and enter the code in another.
 
-### Usar no celular
-
-Para instalar uma PWA e usar todos os recursos criptográficos do navegador, publique o serviço com **HTTPS**. Acesse o mesmo endereço HTTPS no celular e no computador; depois use “Instalar aplicativo” no Chrome/Edge ou “Adicionar à Tela de Início” no Safari.
-
-Servir `http://192.168.x.x:4173` pode ajudar a testar na rede local, mas navegadores móveis não tratam esse endereço como contexto seguro e normalmente não oferecem instalação. Em produção, coloque o contêiner atrás de Caddy, Nginx, Traefik ou de uma plataforma que forneça TLS.
+TURN is optional. To enable it, copy `.env.example` to `.env`, fill in the Cloudflare values and start the server with:
 
 ```bash
-docker build -t ponte .
-docker run --rm -p 4173:4173 ponte
+node --env-file=.env server.js
 ```
 
-## Mesma rede e redes diferentes
+Phones need HTTPS to install the PWA and use the camera. See [DEPLOY.md](./DEPLOY.md) for the production setup.
 
-Sem configuração adicional, o Ponte usa STUN e consegue atravessar muitos roteadores. Para funcionar de modo confiável entre 4G/5G, redes corporativas ou roteadores distintos, configure TURN. A opção recomendada é Cloudflare Realtime TURN:
-
-```powershell
-$env:CLOUDFLARE_TURN_KEY_ID='id-da-chave'
-$env:CLOUDFLARE_TURN_API_TOKEN='token-secreto'
-npm.cmd start
-```
-
-O token fica somente no backend. Cada acesso a `/api/config` recebe credenciais TURN curtas, nunca a chave de longa duração. Também há suporte a coturn próprio por `TURN_URLS` e `TURN_SHARED_SECRET`. O arquivo [`.env.example`](./.env.example) mostra os formatos.
-
-A estratégia de produção e o passo a passo estão em [`DEPLOY.md`](./DEPLOY.md).
-
-## Modelo de segurança
-
-1. Os aparelhos entram em uma sala temporária, limitada a dois participantes e expirada após 15 minutos. O QR Code contém apenas a URL e esse código temporário.
-2. O servidor encaminha apenas as mensagens necessárias para estabelecer o WebRTC. Não recebe o arquivo ou o texto.
-3. O WebRTC cifra o canal com DTLS. Para conteúdo sensível, compare o **código de segurança** exibido nos dois aparelhos; códigos diferentes indicam que o pareamento não deve ser usado.
-4. Cada arquivo é lido e enviado em blocos de 64 KiB. O SHA-256 é calculado incrementalmente nos dois lados.
-5. O receptor só cria o link “Salvar arquivo verificado” quando tamanho e SHA-256 correspondem ao original. Caso contrário, os bytes são descartados.
-6. A leitura do QR acontece localmente; os quadros da câmera não são enviados ao servidor.
-
-O servidor ainda aplica limite de tamanho das mensagens, limite de tentativas por IP, validação de origem do WebSocket, cabeçalhos CSP e não mantém banco de dados. Em uma instalação pública, use TLS, atualize dependências, proteja o TURN e monitore abuso.
-
-## Integridade e metadados
-
-O conteúdo binário do arquivo é preservado exatamente; nome e tipo MIME também são transportados. O sistema operacional atribui uma nova data de criação/download ao arquivo salvo. Essa data externa não faz parte dos bytes e não pode ser preservada por uma PWA por restrições de segurança do navegador. Para arquivos que guardam metadados internamente (EXIF de fotos, propriedades de PDF, ZIP etc.), esses metadados permanecem intactos porque os bytes não são reprocessados.
-
-O protótipo limita cada arquivo a 512 MB e mantém o arquivo recebido em memória até a verificação terminar. Para arquivos de vários gigabytes, a evolução recomendada é um aplicativo nativo (Tauri/Capacitor) ou gravação por streaming com a File System Access API onde ela estiver disponível.
-
-## Limites honestos do MVP
-
-- Não há contas, histórico na nuvem ou recuperação depois que a sessão termina.
-- O código de 6 dígitos é uma conveniência de descoberta, não uma senha forte; o código de segurança visual é a proteção contra pareamento indevido.
-- Sem TURN configurado, alguns pares de redes não conseguem estabelecer uma rota direta; `/api/config` informa `turnConfigured: false` nesse caso.
-- iOS e alguns navegadores podem suspender a transferência se o aplicativo for colocado em segundo plano.
-- O receptor ainda precisa tocar em “Salvar arquivo verificado” para gravá-lo na pasta escolhida pelo sistema.
-
-## Verificação
+## Tests
 
 ```bash
 npm run check
+npm test
 ```
 
-Esse comando valida a sintaxe do servidor, do aplicativo e do service worker. O aplicativo também executa um vetor de teste conhecido de SHA-256 ao iniciar.
+`npm test` covers HTTP endpoints, temporary TURN credentials, QR codes, origin validation, the `/api/config` rate limit and the order of signaling messages.
+
+## Limitations
+
+- The 6-digit code helps devices find each other. It is not a strong password, and the security code is what protects against the wrong device pairing.
+- iOS and some browsers may suspend a transfer when the app goes to the background.
+- The receiver has to tap "Save" to write the verified file to disk.
+- Anyone who reaches `/api/config` can get temporary TURN credentials, within the rate limit.
+
+## What I learned
+
+- WebSocket events do not wait for async handlers, so SDP and ICE messages have to go through an explicit queue to stay in order.
+- ICE candidates can arrive before the remote description. They need to be held and applied later, otherwise the connection fails between some computers. `test/signaling.js` covers these cases.
+- Some browsers do not treat WebSocket URLs as part of `connect-src 'self'`, so the CSP has to name the `wss://` origin explicitly.
+
+## Next steps
+
+- Issue TURN credentials only after two devices are paired in a room
+- Write to disk while receiving, using the File System Access API, to go beyond the memory limit
+- Move rooms to a shared store such as Redis to allow more than one instance
+
+## License
+
+[MIT](./LICENSE)
